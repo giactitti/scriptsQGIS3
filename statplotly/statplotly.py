@@ -1,33 +1,3 @@
-#!/usr/bin/python
-#coding=utf-8
-"""
-/***************************************************************************
-Statplotly
-        begin                : 2020-03
-        copyright            : (C) 2020 by Giacomo Titti and Matteo Mantovani, 
-                               Padova, March 2020
-        email                : giacomotitti@gmail.com
- ***************************************************************************/
-
-/***************************************************************************
-    Statplotly                                          
-    Copyright (C) 2020 by Giacomo Titti and Matteo Mantovani, Padova, March 2020          
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
- ***************************************************************************/
-"""
-
 """
 Model exported as python.
 Name : StatPlotly
@@ -43,6 +13,7 @@ from qgis.core import QgsProcessingParameterField
 from qgis.core import QgsProcessingParameterVectorDestination
 from qgis.core import QgsProcessingParameterFileDestination
 from qgis.core import QgsVectorLayer
+from qgis.core import QgsProcessingParameterExpression
 import processing
 #import plotly.express as px
 import numpy as np
@@ -51,18 +22,22 @@ import chart_studio.plotly as py
 #import chart_studio.plotly as py
 import plotly.graph_objs as go
 import plotly.offline
+from qgis.PyQt.QtCore import QCoreApplication
+from qgis.core import QgsMessageLog
+from qgis.core import Qgis
 
 
 class StatsOfPoints(QgsProcessingAlgorithm):
 
     def initAlgorithm(self, config=None):
-        self.addParameter(QgsProcessingParameterVectorLayer('ps', 'PS', types=[QgsProcessing.TypeVectorPoint], defaultValue=None))
-        self.addParameter(QgsProcessingParameterVectorLayer('v1', 'V1', types=[QgsProcessing.TypeVectorPolygon], defaultValue=None))
-        self.addParameter(QgsProcessingParameterVectorLayer('v2', 'V2', types=[QgsProcessing.TypeVectorPolygon], defaultValue=None))
-        self.addParameter(QgsProcessingParameterField('field', 'field', type=QgsProcessingParameterField.Numeric, parentLayerParameterName='ps', allowMultiple=False, defaultValue=None))
-        self.addParameter(QgsProcessingParameterVectorDestination('Masked', 'masked', type=QgsProcessing.TypeVectorAnyGeometry, createByDefault=True, defaultValue=None))
-        self.addParameter(QgsProcessingParameterFileDestination('Plotted', 'plotted', fileFilter='HTML files (*.html)', createByDefault=True, defaultValue=None))
-        self.addParameter(QgsProcessingParameterFileDestination('Out', 'out', optional=True, fileFilter='.csv files (*.csv)', createByDefault=True, defaultValue=None))
+        self.addParameter(QgsProcessingParameterVectorLayer('ps', self.tr('PS'), types=[QgsProcessing.TypeVectorPoint], defaultValue=None))
+        self.addParameter(QgsProcessingParameterVectorLayer('v1', self.tr('Polygon 1'), types=[QgsProcessing.TypeVectorPolygon], defaultValue=None))
+        self.addParameter(QgsProcessingParameterVectorLayer('v2', self.tr('Polygon 2'), types=[QgsProcessing.TypeVectorPolygon], defaultValue=None))
+        #self.addParameter(QgsProcessingParameterField('field', 'field', type=QgsProcessingParameterField.Numeric, parentLayerParameterName='ps', allowMultiple=False, defaultValue=None))
+        self.addParameter(QgsProcessingParameterFileDestination('Plotted', self.tr('Plots of PS distribution'), fileFilter='HTML files (*.html)', createByDefault=True, defaultValue=None))
+        self.addParameter(QgsProcessingParameterFileDestination('Out', self.tr('PS statistics'), optional=True, fileFilter='.csv files (*.csv)', createByDefault=True, defaultValue=None))
+        self.addParameter(QgsProcessingParameterExpression('formula', self.tr('New field values calculated by formula for PS statistics'), parentLayerParameterName='ps', defaultValue=''))
+        self.addParameter(QgsProcessingParameterVectorDestination('Masked', self.tr('PS clipped by Poly 1 and Poly 2 intersection'), type=QgsProcessing.TypeVectorPoint, createByDefault=True, defaultValue=None))
 
     def processAlgorithm(self, parameters, context, model_feedback):
         # Use a multi-step feedback, so that individual child algorithm progress reports are adjusted for the
@@ -96,29 +71,62 @@ class StatsOfPoints(QgsProcessingAlgorithm):
         outputs['ClipVectorByMaskLayer'] = processing.run('gdal:clipvectorbypolygon', alg_params, context=context, feedback=feedback, is_child_algorithm=True)
         results['Masked'] = outputs['ClipVectorByMaskLayer']['OUTPUT']
 
+
         feedback.setCurrentStep(2)
         if feedback.isCanceled():
             return {}
 
+        # Field calculator
+
+        # # Advanced Python field calculator
+        # alg_params = {
+        #     'FIELD_LENGTH': 10,
+        #     'FIELD_NAME': 'NewField',
+        #     'FIELD_PRECISION': 3,
+        #     'FIELD_TYPE': 1,
+        #     'FORMULA': '',
+        #     'GLOBAL': parameters['formula'],
+        #     'INPUT': outputs['ClipVectorByMaskLayer']['OUTPUT'],
+        #     'OUTPUT': QgsProcessing.TEMPORARY_OUTPUT
+        # }
+        # outputs['AdvancedPythonFieldCalculator'] = processing.run('qgis:advancedpythonfieldcalculator', alg_params, context=context, feedback=feedback, is_child_algorithm=True)
+
+        alg_params = {
+            'FIELD_LENGTH': 10,
+            'FIELD_NAME': 'NewField',
+            'FIELD_PRECISION': 3,
+            'FIELD_TYPE': 0,
+            'FORMULA': parameters['formula'],
+            'INPUT': outputs['ClipVectorByMaskLayer']['OUTPUT'],
+            'NEW_FIELD': True,
+            'OUTPUT': '/tmp/newfield.shp'
+        }
+        outputs['FieldCalculator'] = processing.run('qgis:fieldcalculator', alg_params, context=context, feedback=feedback, is_child_algorithm=True)
+        #results['Masked'] = outputs['FieldCalculator']['OUTPUT']
+
+
+        feedback.setCurrentStep(3)
+        if feedback.isCanceled():
+            return {}
+
+
         # Bar plot
         alg_params = {
-            'INPUT': outputs['ClipVectorByMaskLayer']['OUTPUT'],
-            'NAME_FIELD': parameters['field'],
-            #'VALUE_FIELD': QgsExpression('formula').evaluate(),
+            'INPUT': outputs['FieldCalculator']['OUTPUT'],
+            'NAME_FIELD': 'NewField',
             'OUTPUT': parameters['Plotted']
         }
         self.barplot(alg_params)
-        #outputs['BarPlot'] = processing.run('qgis:barplot', alg_params, context=context, feedback=feedback, is_child_algorithm=True)
-        #results['Plotted'] = outputs['BarPlot']['OUTPUT']
 
-        #feedback.setCurrentStep(3)
-        #if feedback.isCanceled():
-        #    return {}
+
+        # feedback.setCurrentStep(4)
+        # if feedback.isCanceled():
+        #     return {}
 
         # Basic statistics for fields to csv
         alg_params = {
-            'FIELD_NAME': parameters['field'],
-            'INPUT_LAYER': outputs['ClipVectorByMaskLayer']['OUTPUT'],
+            'FIELD_NAME': 'NewField',
+            'INPUT_LAYER': outputs['FieldCalculator']['OUTPUT'],
             'OUTPUT_HTML_FILE': parameters['Out']
         }
         outputs['BasicStatisticsForFieldsToCsv'] = processing.run('script:basicstatisticsforfieldstocsv', alg_params, context=context, feedback=feedback, is_child_algorithm=True)
@@ -127,18 +135,12 @@ class StatsOfPoints(QgsProcessingAlgorithm):
 
     def barplot(self,parameters):
         #shp = "D:\file.shp"
+        QgsMessageLog.logMessage(parameters['INPUT'], 'MyPlugin', level=Qgis.Info)
         layer = QgsVectorLayer(parameters['INPUT'],"capa","ogr")
-        #driver = ogr.GetDriverByName('ESRI Shapefile')
-        #dataSource = driver.Open(shp,0)
-        #layer=dataSource.GetLayer()
-        ValList = []
         count=1
-        #idx = layer.fieldNameIndex(parameters['NAME_FIELD'])
-        #print(feature.attributes()[idx])
+        ValList=[]
         for feat in layer.getFeatures():
-            #ValList.append(layer.getFeature(count).attributes()[2])
             ValList.append(feat[parameters['NAME_FIELD']])
-            #print(ValList)
             count = count+1
         df = np.array(ValList)
         #fig = px.histogram(df, x="total_bill")
@@ -146,33 +148,8 @@ class StatsOfPoints(QgsProcessingAlgorithm):
         #fig.show()
         plotly.offline.plot(fig, filename=parameters['OUTPUT'])
 
-#        self.rebinnable_interactive_histogram(df, "air_time")
-#        #py.iplot(data, filename='basic histogram')
-#        #fig.show()
-#
-#    def rebinnable_interactive_histogram(self,series, initial_bin_width=10):
-#        figure_widget = go.FigureWidget(
-#            data=[go.Histogram(x=series, xbins={"size": initial_bin_width})]
-#        )
-#
-#       bin_slider = widgets.FloatSlider(
-#           value=initial_bin_width,
-#            min=1,
-#            max=30,
-#            step=1,
-#            description="Bin width:",
- #           readout_format=".0f",  # display as integer
-##        )
-#
- #       histogram_object = figure_widget.data[0]
-#
- #       def set_bin_size(change):
-#            histogram_object.xbins = {"size": change["new"]}
-#
-#        bin_slider.observe(set_bin_size, names="value")
-#
-#        output_widget = widgets.VBox([figure_widget, bin_slider])
-#        return output_widget
+    def tr(self, string):
+        return QCoreApplication.translate('Processing', string)
 
     def name(self):
         return 'StatsPlotly'
